@@ -1,0 +1,387 @@
+openapi: 3.0.3
+info:
+  title: TDI Mock Server
+  version: "1.13.0-mock"
+  description: |
+    Mock of PT. Terra Data Indonesia's ("Alterra") sandbox API — **Telkomsel, XL, and
+    Smartfren products only** (source doc: `TDI - API DOC - v1.13.0`, Indosat/IOH
+    sections excluded). Every call returns dummy data shaped exactly like the real
+    contract. Nothing is persisted between calls.
+
+    ## Auth
+    Every endpoint requires:
+    - `Api-Key: mock-api-key`
+    - `Partner-Secret: mock-partner-secret`
+
+    (override via `TDI_MOCK_API_KEY` / `TDI_MOCK_PARTNER_SECRET` env vars on the
+    deployment). Wrong/missing values return the real `4011` / `4002` error envelope.
+
+    ## Scenario selection (MSISDN-driven)
+    Every product's success result is **deterministic per MSISDN** — the same number
+    always returns the same result, spread pseudo-randomly across that product's real
+    documented value range so different test numbers exercise different buckets.
+
+    To force a specific **error** instead of success, use an MSISDN matching
+    `62999#XXXXXXX` — the digit right after `999` selects which documented error
+    (Section 2.4) comes back:
+
+    | Digit | Error |
+    |---|---|
+    | `629990...` | 4027 / 9001 — Product Not Found |
+    | `629991...` | 4027 / 9002 — Product Closed |
+    | `629992...` | 4027 / 9003 — Cipher Data Payload Error |
+    | `629993...` | 4027 / 9005 — Balance Not Enough |
+    | `629994...` | 4027 / 9008 — Error Hit Operator |
+    | `629995...` | 4027 / 9009 — Biller Response Not Mapping |
+    | `629996...` | 4002 — Data Request Body is Empty |
+    | `629997...` | 4023 — User Deleted/Archived (HTTP 423) |
+    | `629998...` | 5001 — Transaction Error |
+    | `629999...` | 5099 — Internal Error Problem (HTTP 500) |
+
+    Any other MSISDN (e.g. `6281234567890`) takes the success path.
+
+    ## Telkomsel encryption
+    AES-256-CBC, PKCS7 padding, key = SHA-256(secret), 16-byte random IV prepended to
+    the ciphertext, then Base64 (TDI doc Section 4, implemented for real — not faked).
+    Mock secret: `mock-telkomsel-secret-2026` (override via `TDI_MOCK_TELKOMSEL_SECRET`).
+
+    ## Telkomsel product selection (mock-only convention)
+    All 9 Telkomsel products share one outer `product_code: "C1BYPASS"` in the real
+    doc, and 3 of them (Active Status / Interests / SIM Swap) have an otherwise
+    byte-identical decrypted plain-payload shape. This mock repurposes the
+    already-present `transaction.product_id` field as an explicit selector — **not**
+    part of the real TDI contract, a mock-only extension. Valid values:
+    `LOCATION_VERIFICATION`, `NIK_CHECK`, `TELCO_SCORE`, `RECYCLE_CHECK`,
+    `ACTIVE_STATUS`, `INTERESTS`, `SIM_SWAP`, `LAST_LOCATION`, `TENURE`.
+
+servers:
+  - url: /
+
+tags:
+  - name: Telkomsel
+  - name: XL
+  - name: Smartfren
+  - name: Meta
+
+paths:
+  /api/v1/c1/transaction/wrapper/bypass:
+    post:
+      tags: [Telkomsel]
+      summary: Telkomsel C1BYPASS — all 9 Telkomsel products (selected via transaction.product_id)
+      description: |
+        Real TDI path & envelope. The `request.ciphertext` field must be a genuine
+        AES-256-CBC(SHA-256(`mock-telkomsel-secret-2026`)) encryption of the JSON plain
+        payload appropriate to the product you're testing (see each product's shape
+        below — same shapes as TDI doc Sections 2.3.1-2.3.9). Use `transaction.product_id`
+        to tell the mock which of the 9 products to run (mock-only convention, see top
+        description).
+
+        **Plain payload shapes (before encryption), by product_id:**
+        - `LOCATION_VERIFICATION`: `{"transaction":{"transaction_id","consent_id","msisdn"},"parameter":{"location_type":"home|work","long"?,"lat"?,"address"?,"zip_code"?}}` → response `score` 1-7
+        - `NIK_CHECK`: `{"transaction":{...},"parameter":{"nik","channel":"of","partner_name"?}}` → response `score` 1-4
+        - `TELCO_SCORE`: `{"transaction":{"transaction_id"},"request":{"msisdn","table_code"},"consent":{"consent_id","partner_id"}}` → response `score`
+        - `RECYCLE_CHECK`: `{"transaction":{...},"parameter":{"timestamp":"yyyy-MM-dd","channel","partner_name"}}` → response `result` Yes/No
+        - `ACTIVE_STATUS`: `{"transaction":{...},"parameter":{"partner_name"}}` → response `result` ACTIVE/CHURN/EXPIRED/GRACE
+        - `INTERESTS`: `{"transaction":{...},"parameter":{"partner_name"}}` → response `result` array of strings
+        - `SIM_SWAP`: `{"transaction":{...},"parameter":{"partner_name"}}` → response `score` 1-4
+        - `LAST_LOCATION`: `{"transaction":{...},"parameter":{"longitude","latitude","area"}}` → response `result` boolean
+        - `TENURE`: `{"transaction":{"transaction_id"},"request":{"msisdn","table_code"},"consent":{"consent_id","partner_id"}}` → response `score` 1-5
+      security: [{ ApiKeyAuth: [], PartnerSecretAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelkomselRequest'
+            examples:
+              LOCATION_VERIFICATION:
+                summary: Location Verification
+                value:
+                  transaction:
+                    product_code: C1BYPASS
+                    transaction_id: TRX-TEST001
+                    partner_id: partner_id_from_tsel
+                    client_id: client_id_from_tsel
+                    product_id: LOCATION_VERIFICATION
+                    consent_reference: REF1
+                  request:
+                    telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y
+                    telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3
+                    ciphertext: "<AES-256-CBC(SHA256(mock-telkomsel-secret-2026)) of the LOCATION_VERIFICATION plain payload above>"
+              NIK_CHECK:
+                summary: NIK Check
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: NIK_CHECK, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted NIK_CHECK plain payload>" }
+              TELCO_SCORE:
+                summary: Telco Score
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: TELCO_SCORE, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted TELCO_SCORE plain payload>" }
+              RECYCLE_CHECK:
+                summary: Recycle Check
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: RECYCLE_CHECK, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted RECYCLE_CHECK plain payload>" }
+              ACTIVE_STATUS:
+                summary: Active Status
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: ACTIVE_STATUS, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted ACTIVE_STATUS plain payload>" }
+              INTERESTS:
+                summary: Interests
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: INTERESTS, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted INTERESTS plain payload>" }
+              SIM_SWAP:
+                summary: SIM Swap
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: SIM_SWAP, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted SIM_SWAP plain payload>" }
+              LAST_LOCATION:
+                summary: Last Location
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: LAST_LOCATION, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted LAST_LOCATION plain payload>" }
+              TENURE:
+                summary: Tenure
+                value:
+                  transaction: { product_code: C1BYPASS, transaction_id: TRX-TEST001, partner_id: partner_id_from_tsel, client_id: client_id_from_tsel, product_id: TENURE, consent_reference: REF1 }
+                  request: { telkomsel_api_key: ahtx87hxhwxmaacpwzdwdw7y, telkomsel_signature: a43be4c135fdaaf73efb62fa433d743ed7b3, ciphertext: "<encrypted TENURE plain payload>" }
+      responses:
+        '200':
+          description: Success or documented business error (both HTTP 200, mirroring real TDI — decrypt `response.ciphertext` to see status_code/status_desc/score/result)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelkomselResponse'
+              example:
+                transaction: { transaction_id: TRX-TEST001, status_code: "00000", status_desc: Success }
+                response: { ciphertext: "FPXANoJ6mPrSuVtERewiIpERb7iH4..." }
+        '400':
+          description: Malformed request / decrypt failure
+        '401':
+          description: Api-Key / Partner-Secret mismatch
+        '423':
+          description: Missing telkomsel_api_key/telkomsel_signature, or MSISDN-forced 4023 scenario
+
+  /api/v1/c3/transaction:
+    post:
+      tags: [XL]
+      summary: XL — all 10 XL products (selected via product_code)
+      security: [{ ApiKeyAuth: [], PartnerSecretAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/XlRequest'
+            examples:
+              C3NIKCHECK:
+                summary: NIK Check
+                value: { product_code: C3NIKCHECK, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1", nik: "3533041111950023" }
+              C3CREDITSCORE:
+                summary: Credit Score
+                value: { product_code: C3CREDITSCORE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1" }
+              C3RECYCLE:
+                summary: Recycle
+                value: { product_code: C3RECYCLE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1", last_verified_date: "2023-10-25" }
+              C3LOCVER:
+                summary: Location Score
+                value: { product_code: C3LOCVER, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1", latitude: "-6.22345", longitude: "106.816666" }
+              XLCHECKHOMELONGLAT:
+                summary: Home Location Verification
+                value: { product_code: XLCHECKHOMELONGLAT, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1", latitude: "-6.22345", longitude: "106.816666", month_id: "202502" }
+              XLCHECKWORKLONGLAT:
+                summary: Work Location Verification
+                value: { product_code: XLCHECKWORKLONGLAT, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1", latitude: "-6.22345", longitude: "106.816666", month_id: "202502" }
+              XLMSISDNSTATUS:
+                summary: Active Status
+                value: { product_code: XLMSISDNSTATUS, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1" }
+              XLIMSICHANGE:
+                summary: SIM Swap
+                value: { product_code: XLIMSICHANGE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1" }
+              XLSUBTENURE:
+                summary: Get Masked Subscriber Tenure
+                value: { product_code: XLSUBTENURE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1" }
+              XLLASTCITY:
+                summary: Last City Location
+                value: { product_code: XLLASTCITY, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", msisdn: "6281234567890", consent_id: "1", city_code: "1607" }
+      responses:
+        '200':
+          description: Success or documented business error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+              example:
+                success: true
+                message: OK
+                error_code: "0000"
+                error_message: OK Everything
+                timestamp: "2024-01-22T07:38:58.247035791Z"
+                request_id: "68eab11a91ade62740947f0051b84a0"
+                data: { trx_rc: "00", trx_status: SUCCESS, trx_message: Trx Success, msisdn: "6281234567890", partner_trx_id: "1", trx_id: cmn2s8jll8d7ulvlgq2g, product_price: 1, product_code: C3NIKCHECK, result: "1" }
+        '400':
+          description: Malformed request / unknown product_code / MSISDN-forced business error
+        '401':
+          description: Api-Key / Partner-Secret mismatch
+
+  /api/v1/c4/transaction:
+    post:
+      tags: [Smartfren]
+      summary: Smartfren — all 9 Smartfren products (selected via product_code)
+      security: [{ ApiKeyAuth: [], PartnerSecretAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SmartfrenRequest'
+            examples:
+              SF-TENURE:
+                summary: Tenure
+                value: { product_code: SF-TENURE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132" }
+              SF-ACTIVE-STATUS:
+                summary: Active Status
+                value: { product_code: SF-ACTIVE-STATUS, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132" }
+              SF-HOME-LOCVER:
+                summary: Home Location
+                value: { product_code: SF-HOME-LOCVER, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132", address: "Jl. Mawar No. 02, Setia Budi, Jakarta" }
+              SF-OFFICE-LOCVER:
+                summary: Office Location
+                value: { product_code: SF-OFFICE-LOCVER, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132", address: "Jl. Melati No. 05, Setia Budi, Jakarta" }
+              SF-TELCO-SCORE:
+                summary: Telco Score
+                value: { product_code: SF-TELCO-SCORE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132" }
+              SF-RECYCLE:
+                summary: Recycle
+                value: { product_code: SF-RECYCLE, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132" }
+              SF-INTERESTS:
+                summary: Interests
+                value: { product_code: SF-INTERESTS, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132" }
+              SF-KTP-MATCH:
+                summary: KTP Match
+                value: { product_code: SF-KTP-MATCH, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132", nik: "3533041111950023" }
+              SF-SIM-SWAP:
+                summary: SIM Swap
+                value: { product_code: SF-SIM-SWAP, partner_transaction_id: "1", is_sync: true, callback_url: "https://yourcallback.com", consent_id: "Consent.TDI", msisdn: "6288227781132", period: "48" }
+      responses:
+        '200':
+          description: Success or documented business error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenericResponse'
+              example:
+                success: true
+                message: OK
+                error_code: "0000"
+                error_message: OK Everything
+                timestamp: "2024-01-22T07:38:58.247035791Z"
+                request_id: "68eab11a91ade62740947f0051b84a0"
+                data: { trx_rc: "00", trx_status: SUCCESS, trx_message: Trx Success, msisdn: "6288227781132", partner_trx_id: "1", trx_id: cmn2s8jll8d7ulvlgq2g, product_price: 1, product_code: SF-ACTIVE-STATUS, result: "Yes" }
+        '400':
+          description: Malformed request / unknown product_code / MSISDN-forced business error
+        '401':
+          description: Api-Key / Partner-Secret mismatch
+
+  /health:
+    get:
+      tags: [Meta]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: OK
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Api-Key
+    PartnerSecretAuth:
+      type: apiKey
+      in: header
+      name: Partner-Secret
+  schemas:
+    TelkomselRequest:
+      type: object
+      required: [transaction, request]
+      properties:
+        transaction:
+          type: object
+          required: [product_code, transaction_id, product_id]
+          properties:
+            product_code: { type: string, example: C1BYPASS }
+            transaction_id: { type: string }
+            partner_id: { type: string }
+            client_id: { type: string }
+            product_id:
+              type: string
+              description: "Mock-only selector — see top-level description for valid values"
+            consent_reference: { type: string }
+        request:
+          type: object
+          required: [telkomsel_api_key, telkomsel_signature, ciphertext]
+          properties:
+            telkomsel_api_key: { type: string }
+            telkomsel_signature: { type: string }
+            ciphertext: { type: string }
+    TelkomselResponse:
+      type: object
+      properties:
+        transaction:
+          type: object
+          properties:
+            transaction_id: { type: string }
+            status_code: { type: string }
+            status_desc: { type: string }
+        response:
+          type: object
+          properties:
+            ciphertext: { type: string }
+    XlRequest:
+      type: object
+      required: [product_code, msisdn]
+      properties:
+        product_code: { type: string }
+        partner_transaction_id: { type: string }
+        is_sync: { type: boolean }
+        callback_url: { type: string }
+        msisdn: { type: string }
+        consent_id: { type: string }
+      additionalProperties: true
+    SmartfrenRequest:
+      type: object
+      required: [product_code, msisdn]
+      properties:
+        product_code: { type: string }
+        partner_transaction_id: { type: string }
+        is_sync: { type: boolean }
+        callback_url: { type: string }
+        msisdn: { type: string }
+        consent_id: { type: string }
+      additionalProperties: true
+    GenericResponse:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        error_code: { type: string }
+        error_message: { type: string }
+        timestamp: { type: string }
+        request_id: { type: string }
+        data:
+          type: object
+          properties:
+            trx_rc: { type: string }
+            trx_status: { type: string }
+            trx_message: { type: string }
+            msisdn: { type: string }
+            partner_trx_id: { type: string }
+            trx_id: { type: string }
+            product_price: { type: integer }
+            product_code: { type: string }
+            result: { type: string }
